@@ -1,4 +1,4 @@
-import { AppState, Group, Expense, Settlement, Balance, Activity } from './types';
+import { AppState, Group, Expense, Settlement, Balance, Activity, User } from './types';
 import { SAMPLE_DATA } from './sampleData';
 
 const STORAGE_KEY = 'spendwise-data';
@@ -210,6 +210,93 @@ export function calculateUserTotals(): { totalOwed: number; totalOwing: number }
   });
 
   return { totalOwed, totalOwing };
+}
+
+// --- Users ---
+export function createUser(data: { name: string; email: string; avatarColor?: string }): User {
+  const state = getState();
+  const colors = ['#E9785B', '#43875A', '#6CA6C9', '#E9B94E', '#9B8DC4', '#D9658B'];
+  const user: User = {
+    id: generateId('user'),
+    name: data.name,
+    email: data.email,
+    avatarColor: data.avatarColor || colors[Math.floor(Math.random() * colors.length)],
+  };
+  saveState({ ...state, users: [...state.users, user] });
+  return user;
+}
+
+// --- Simplified Debts Algorithm ---
+export interface SimplifiedDebt {
+  fromUserId: string;
+  toUserId: string;
+  amount: number;
+  groupId?: string;
+}
+
+export function calculateSimplifiedDebts(groupId?: string): SimplifiedDebt[] {
+  const state = getState();
+  const balanceMap: Record<string, number> = {};
+
+  const expenses = groupId ? state.expenses.filter(e => e.groupId === groupId) : state.expenses;
+  const settlements = groupId ? state.settlements.filter(s => s.groupId === groupId) : state.settlements;
+
+  expenses.forEach(expense => {
+    expense.splits.forEach(split => {
+      if (split.userId !== expense.paidBy) {
+        balanceMap[expense.paidBy] = (balanceMap[expense.paidBy] ?? 0) + split.amount;
+        balanceMap[split.userId] = (balanceMap[split.userId] ?? 0) - split.amount;
+      }
+    });
+  });
+
+  settlements.forEach(s => {
+    balanceMap[s.fromUserId] = (balanceMap[s.fromUserId] ?? 0) + s.amount;
+    balanceMap[s.toUserId] = (balanceMap[s.toUserId] ?? 0) - s.amount;
+  });
+
+  // Separate debtors and creditors
+  const debtors: { userId: string; amount: number }[] = [];
+  const creditors: { userId: string; amount: number }[] = [];
+
+  Object.entries(balanceMap).forEach(([userId, bal]) => {
+    const rounded = Math.round(bal * 100) / 100;
+    if (rounded < -0.01) {
+      debtors.push({ userId, amount: Math.abs(rounded) });
+    } else if (rounded > 0.01) {
+      creditors.push({ userId, amount: rounded });
+    }
+  });
+
+  debtors.sort((a, b) => b.amount - a.amount);
+  creditors.sort((a, b) => b.amount - a.amount);
+
+  const debts: SimplifiedDebt[] = [];
+  let d = 0;
+  let c = 0;
+
+  while (d < debtors.length && c < creditors.length) {
+    const debtor = debtors[d];
+    const creditor = creditors[c];
+    const settledAmount = Math.min(debtor.amount, creditor.amount);
+
+    if (settledAmount > 0.01) {
+      debts.push({
+        fromUserId: debtor.userId,
+        toUserId: creditor.userId,
+        amount: Math.round(settledAmount * 100) / 100,
+        groupId,
+      });
+    }
+
+    debtor.amount -= settledAmount;
+    creditor.amount -= settledAmount;
+
+    if (debtor.amount < 0.01) d++;
+    if (creditor.amount < 0.01) c++;
+  }
+
+  return debts;
 }
 
 export function updateSettings(updates: Partial<AppState['settings']>): void {
